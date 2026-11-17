@@ -3,7 +3,7 @@
 A reach-only automatic torch placer for [Horizon](https://github.com/horizon-rust/horizon),
 as a native mixin mod (`torchplacer.hnmod`).
 
-It scans the cells around you every 10 ticks (configurable) and, when it finds
+It scans the cells around you every tick at 20 TPS (configurable) and, when it finds
 an empty cell in reach whose light level is at or below the threshold, selects
 a torch from your hotbar and places it on the solid block below through the
 normal use action. Vanilla reach, item consumption and placement rules apply.
@@ -28,7 +28,7 @@ changed from the mod's settings page (toggle / light level / radius).
 
 - The light level is `max(block light, sky light - sky darken)`, each 0–15
   (the same effective brightness Horizon uses for mob spawning, so night is
-  correctly dark). Default threshold: 8.
+  correctly dark). Default threshold: 4.
 - A cell is only used if it is air or replaceable, is not inside your body,
   has a solid block under it *or beside it* (floor or wall attachment), has
   no torch in its 3×3×3 neighbourhood, and

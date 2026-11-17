@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub const ID: &str = "torchplacer";
-pub const VERSION: &str = "0.1.3";
+pub const VERSION: &str = "0.1.4";
 pub const DESCRIPTION: &str = "Places torches in nearby dark spots (reach only)";
 
 /// 4.5 blocks — vanilla reach for placing a block.
@@ -36,7 +36,7 @@ fn with<R>(f: impl FnOnce(&mut S) -> R) -> R {
     if g.is_none() {
         *g = Some(S {
             enabled: true,
-            radius: 5,
+            radius: 7,
             threshold: 4,
             interval: 1,
             ticks: 0,

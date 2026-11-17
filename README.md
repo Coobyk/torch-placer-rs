@@ -16,8 +16,8 @@ It never walks anywhere: it lights up wherever you happen to be.
 | `/torch` | Toggle auto-torch on/off |
 | `/torch on` / `/torch off` | Set the state explicitly |
 | `/torch status` | Show state, threshold, radius, interval |
-| `/torch level <0-15>` | Light level at or below which a torch is placed (default 7) |
-| `/torch radius <2-16>` | Scan radius in blocks (default 5; actual placement reach is ~4.5) |
+| `/torch level <0-15>` | Light level at or below which a torch is placed (default 4) |
+| `/torch radius <2-16>` | Scan radius in blocks (default 7; actual placement reach is ~4.5) |
 | `/torch now` | Force a scan on the next tick |
 | `/torch clear` | Forget recent placement cells |
 

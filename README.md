@@ -26,9 +26,12 @@ changed from the mod's settings page (toggle / light level / radius).
 
 ## Behavior notes
 
-- The light level is `max(block light, sky light)`, each 0–15.
+- The light level is `max(block light, sky light - sky darken)`, each 0–15
+  (the same effective brightness Horizon uses for mob spawning, so night is
+  correctly dark). Default threshold: 8.
 - A cell is only used if it is air or replaceable, is not inside your body,
-  has a solid block under it, has no torch in its 3×3×3 neighbourhood, and
+  has a solid block under it *or beside it* (floor or wall attachment), has
+  no torch in its 3×3×3 neighbourhood, and
   was not used in the last 200 ticks (60 ticks if the placement failed).
 - If there is no torch in hotbar slots 1–9 it says so once and waits; it
   detects a torch again as soon as you add one.

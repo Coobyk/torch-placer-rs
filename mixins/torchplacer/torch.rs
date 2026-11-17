@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub const ID: &str = "torchplacer";
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = "0.1.2";
 pub const DESCRIPTION: &str = "Places torches in nearby dark spots (reach only)";
 
 /// 4.5 blocks — vanilla reach for placing a block.
@@ -37,7 +37,7 @@ fn with<R>(f: impl FnOnce(&mut S) -> R) -> R {
         *g = Some(S {
             enabled: true,
             radius: 5,
-            threshold: 7,
+            threshold: 8,
             interval: 10,
             ticks: 0,
             held: 0,
@@ -65,10 +65,16 @@ static OWNED: Mutex<(bool, bool)> = Mutex::new((false, false)); // (right, hit)
 
 fn claim(game: &mut crate::game::Game<'_>, hit: Option<crate::game::Hit>) {
     let mut o = OWNED.lock().unwrap_or_else(|e| e.into_inner());
+    // Re-select every tick: another mod can change the held slot between
+    // ours, and the use action must act on a torch.
+    if let Some(slot) = torch_slot(game) {
+        game.selected = slot;
+    }
     game.right = true;
     o.0 = true;
     game.forced_hit = hit;
     o.1 = hit.is_some();
+    game.swing_arm();
 }
 
 fn release(game: &mut crate::game::Game<'_>) {
@@ -195,21 +201,25 @@ fn scan(
     game: &crate::game::Game<'_>,
     me: [i32; 3],
     eye: [f64; 3],
-) -> Option<([i32; 3], [i32; 3])> {
+) -> Option<([i32; 3], crate::game::Hit)> {
     let (radius, threshold) = with(|s| (s.radius, s.threshold));
     let facts = game.res.facts();
-    let mut best: Option<(f64, [i32; 3], [i32; 3])> = None;
+    // Horizon stores SKY light at its full daytime value even at night; the
+    // effective level (what mob spawning uses) subtracts sky darken. Without
+    // this, every outdoor cell reads 15 and nothing is ever "dark" at night.
+    let darken = game.sky_darken();
+    let mut best: Option<(f64, [i32; 3], crate::game::Hit)> = None;
     for dx in -radius..=radius {
         for dz in -radius..=radius {
-            for dy in -2..=2 {
+            for dy in -3..=4 {
                 let cell = [me[0] + dx, me[1] + dy, me[2] + dz];
                 let d2 = dist2(eye, center(cell));
                 if d2 > REACH2 {
                     continue;
                 }
-                // (block, sky), each 0..15; (0,0) for unloaded chunks.
                 let (block, sky) = game.native_light(cell);
-                if block.max(sky) as i32 > threshold {
+                let level = (block as i32).max(sky as i32 - darken);
+                if level > threshold {
                     continue;
                 }
                 let st = game.world.block(cell[0], cell[1], cell[2]);
@@ -223,18 +233,45 @@ fn scan(
                     continue;
                 }
                 let below = [cell[0], cell[1] - 1, cell[2]];
-                let bs = game.world.block(below[0], below[1], below[2]);
-                let bf = facts.get(bs);
-                if !bf.full_collision || bf.name.contains("torch") {
-                    continue;
-                }
-                if best.as_ref().map_or(true, |(b, _, _)| d2 < *b) {
-                    best = Some((d2, cell, below));
+                let bf = facts.get(game.world.block(below[0], below[1], below[2]));
+                let hit = if bf.full_collision && !bf.name.contains("torch") {
+                    Some(crate::game::Hit {
+                        pos: below,
+                        face: [0, 1, 0],
+                        point: [cell[0] as f64 + 0.5, below[1] as f64 + 1.0, cell[2] as f64 + 0.5],
+                    })
+                } else {
+                    // Wall attachment: a solid side neighbour with the face
+                    // pointing into our empty cell.
+                    [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]]
+                        .iter()
+                        .find_map(|d| {
+                            let sup = [cell[0] - d[0], cell[1], cell[2] - d[2]];
+                            let f = facts.get(game.world.block(sup[0], sup[1], sup[2]));
+                            if f.full_collision && !f.name.contains("torch") {
+                                Some(crate::game::Hit {
+                                    pos: sup,
+                                    face: *d,
+                                    point: [
+                                        sup[0] as f64 + 0.5 + d[0] as f64 * 0.5,
+                                        sup[1] as f64 + 0.5,
+                                        sup[2] as f64 + 0.5 + d[2] as f64 * 0.5,
+                                    ],
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                };
+                if let Some(hit) = hit
+                    && best.as_ref().map_or(true, |(b, _, _)| d2 < *b)
+                {
+                    best = Some((d2, cell, hit));
                 }
             }
         }
     }
-    best.map(|(_, cell, below)| (cell, below))
+    best.map(|(_, cell, hit)| (cell, hit))
 }
 
 pub(super) fn tick(game: &mut crate::game::Game<'_>) {
@@ -304,17 +341,8 @@ pub(super) fn tick(game: &mut crate::game::Game<'_>) {
         }
         return;
     };
-    if let Some((cell, below)) = scan(game, me, eye) {
+    if let Some((cell, hit)) = scan(game, me, eye) {
         game.selected = slot;
-        let hit = crate::game::Hit {
-            pos: below,
-            face: [0, 1, 0],
-            point: [
-                cell[0] as f64 + 0.5,
-                below[1] as f64 + 1.0,
-                cell[2] as f64 + 0.5,
-            ],
-        };
         with(|s| {
             s.hit = Some(hit);
             s.held = 6;

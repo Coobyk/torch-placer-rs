@@ -1,0 +1,37 @@
+id = "torchplacer"
+name = "Torch Placer"
+version = "0.1.5"
+description = "Places torches in nearby dark cells (reach only, block light only)"
+authors = []
+api = "0.2"
+side = "client"
+capabilities = ["registries"]
+
+[native]
+game = "26.3"
+horizon = "0b14f8acfd97fa2c750e42795249dcc981178ca4"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
+
+[[native.module]]
+id = "torch"
+file = "crates/horizon-client/src/game.rs"
+name = "umbx_torch"
+source = "src/torch.rs"
+
+[[native.mixin]]
+id = "tick"
+target = "horizon_client::game::native_hooks::client_tick_pre::Game::native_client_tick_pre"
+kind = "HEAD"
+helper = "src/mixins/tick.rs"
+bindings = [{ name = "game", ty = "&mut Game<'_>", value = "&mut *self" }]
+
+[[native.mixin]]
+id = "command"
+target = "horizon_client::game::native_hooks::base::Game::native_command"
+kind = "HEAD"
+helper = "src/mixins/command.rs"
+bindings = [
+  { name = "game", ty = "&mut Game<'_>", value = "&mut *self" },
+  { name = "command", ty = "&str", value = "command" },
+  { name = "ran", ty = "&mut bool", value = "&mut *ran" },
+]

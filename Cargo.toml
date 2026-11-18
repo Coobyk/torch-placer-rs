@@ -1,0 +1,8 @@
+[package]
+name = "torch-placer"
+version = "0.1.5"
+edition = "2024"
+publish = false
+
+[dependencies]
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }

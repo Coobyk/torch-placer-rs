@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub const ID: &str = "torchplacer";
-pub const VERSION: &str = "0.1.4";
+pub const VERSION: &str = "0.1.5";
 pub const DESCRIPTION: &str = "Places torches in nearby dark spots (reach only)";
 
 /// 4.5 blocks — vanilla reach for placing a block.
@@ -99,15 +99,15 @@ fn onoff(v: bool) -> &'static str {
 
 /// Read persisted settings. Missing keys leave the defaults in place.
 fn sync(game: &crate::game::Game<'_>) {
-    if let Some(v) = game.native_setting(ID, "enabled") {
+    if let Some(v) = game.setting(ID, "enabled") {
         with(|s| s.enabled = v == "true");
     }
-    if let Some(v) = game.native_setting(ID, "radius") {
+    if let Some(v) = game.setting(ID, "radius") {
         if let Ok(n) = v.parse::<i32>() {
             with(|s| s.radius = n.clamp(2, 16));
         }
     }
-    if let Some(v) = game.native_setting(ID, "threshold") {
+    if let Some(v) = game.setting(ID, "threshold") {
         if let Ok(n) = v.parse::<i32>() {
             with(|s| s.threshold = n.clamp(0, 15));
         }
@@ -116,7 +116,7 @@ fn sync(game: &crate::game::Game<'_>) {
 
 fn set_enabled(game: &mut crate::game::Game<'_>, v: bool) {
     with(|s| s.enabled = v);
-    game.native_set_setting(ID, "enabled", if v { "true" } else { "false" });
+    game.set_setting(ID, "enabled", if v { "true" } else { "false" });
     if !v {
         with(|s| s.held = 0);
         release(game);
@@ -204,10 +204,17 @@ fn scan(
 ) -> Option<([i32; 3], crate::game::Hit)> {
     let (radius, threshold) = with(|s| (s.radius, s.threshold));
     let facts = game.res.facts();
-    // Horizon stores SKY light at its full daytime value even at night; the
-    // effective level (what mob spawning uses) subtracts sky darken. Without
-    // this, every outdoor cell reads 15 and nothing is ever "dark" at night.
-    let darken = game.sky_darken();
+    // A block can hold a torch if it is solid enough: full blocks, snow,
+    // slabs and stairs. Ignore torches, fluids and unbreakable blocks.
+    let supported = |f: &horizon_items::blocks::StateFacts| {
+        !f.name.contains("torch")
+            && f.fluid == horizon_items::blocks::Fluid::None
+            && f.hardness >= 0.0
+            && (f.full_collision
+                || f.name.contains("snow")
+                || f.name.contains("slab")
+                || f.name.contains("stairs"))
+    };
     let mut best: Option<(f64, [i32; 3], crate::game::Hit)> = None;
     for dx in -radius..=radius {
         for dz in -radius..=radius {
@@ -217,9 +224,10 @@ fn scan(
                 if d2 > REACH2 {
                     continue;
                 }
-                let (block, sky) = game.native_light(cell);
-                let level = (block as i32).max(sky as i32 - darken);
-                if level > threshold {
+                // Block light only — skylight is deliberately ignored, so a
+                // cell is "dark" whenever it has no artificial light source.
+                let block = game.world.light(cell[0], cell[1], cell[2]) & 15;
+                if block as i32 > threshold {
                     continue;
                 }
                 let st = game.world.block(cell[0], cell[1], cell[2]);
@@ -234,11 +242,12 @@ fn scan(
                 }
                 let below = [cell[0], cell[1] - 1, cell[2]];
                 let bf = facts.get(game.world.block(below[0], below[1], below[2]));
-                let hit = if bf.full_collision && !bf.name.contains("torch") {
+                let hit = if supported(bf) {
                     Some(crate::game::Hit {
                         pos: below,
                         face: [0, 1, 0],
                         point: [cell[0] as f64 + 0.5, below[1] as f64 + 1.0, cell[2] as f64 + 0.5],
+                        inside: false,
                     })
                 } else {
                     // Wall attachment: a solid side neighbour with the face
@@ -248,7 +257,7 @@ fn scan(
                         .find_map(|d| {
                             let sup = [cell[0] - d[0], cell[1], cell[2] - d[2]];
                             let f = facts.get(game.world.block(sup[0], sup[1], sup[2]));
-                            if f.full_collision && !f.name.contains("torch") {
+                            if supported(f) {
                                 Some(crate::game::Hit {
                                     pos: sup,
                                     face: *d,
@@ -257,6 +266,7 @@ fn scan(
                                         sup[1] as f64 + 0.5,
                                         sup[2] as f64 + 0.5 + d[2] as f64 * 0.5,
                                     ],
+                                    inside: false,
                                 })
                             } else {
                                 None
@@ -275,7 +285,7 @@ fn scan(
 }
 
 pub(super) fn tick(game: &mut crate::game::Game<'_>) {
-    if !game.native_on(ID) || !game.native_window() {
+    if !game.native_window() || !game.playing() {
         release(game);
         return;
     }
@@ -294,7 +304,7 @@ pub(super) fn tick(game: &mut crate::game::Game<'_>) {
         };
         (feet(p), [p.position.x, p.position.y + 1.62, p.position.z])
     };
-    if !with(|s| s.enabled) || !game.native_playing() {
+    if !with(|s| s.enabled) || !game.playing() {
         release(game);
         return;
     }
@@ -354,7 +364,7 @@ pub(super) fn tick(game: &mut crate::game::Game<'_>) {
 }
 
 pub(super) fn command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut bool) {
-    if !game.native_on(ID) || !game.native_window() {
+    if !game.native_window() || !game.playing() {
         return;
     }
     let mut words = command.split_whitespace();
@@ -393,7 +403,7 @@ pub(super) fn command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut
             if let Some(n) = args.get(1).and_then(|v| v.parse::<i32>().ok()) {
                 let n = n.clamp(0, 15);
                 with(|s| s.threshold = n);
-                game.native_set_setting(ID, "threshold", &n.to_string());
+                game.set_setting(ID, "threshold", &n.to_string());
                 say(game, &format!("light threshold {n}"));
             } else {
                 say(game, "/torch level <0-15>");
@@ -403,7 +413,7 @@ pub(super) fn command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut
             if let Some(n) = args.get(1).and_then(|v| v.parse::<i32>().ok()) {
                 let n = n.clamp(2, 16);
                 with(|s| s.radius = n);
-                game.native_set_setting(ID, "radius", &n.to_string());
+                game.set_setting(ID, "radius", &n.to_string());
                 say(game, &format!("radius {n} (actual reach is ~4.5 blocks)"));
             } else {
                 say(game, "/torch radius <2-16>");
@@ -418,57 +428,5 @@ pub(super) fn command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut
             say(game, "placement history cleared");
         }
         _ => say(game, "/torch [on|off|status|level <n>|radius <n>|now|clear]"),
-    }
-}
-
-pub(super) fn listed(mods: &mut Vec<crate::game::native_hooks::NativeMod>) {
-    mods.push(crate::game::native_hooks::NativeMod {
-        id: ID.into(),
-        title: format!("Torch Placer {VERSION}"),
-        description: DESCRIPTION.into(),
-        keys: Vec::new(),
-    });
-}
-
-pub(super) fn page(game: &crate::game::Game<'_>, mod_id: &str, buttons: &mut Vec<String>) {
-    if mod_id != ID {
-        return;
-    }
-    sync(game);
-    let (v, t, r) = with(|s| (s.enabled, s.threshold, s.radius));
-    buttons.push(format!("Auto-torch: {}", onoff(v)));
-    buttons.push(format!("Light level <= {t}"));
-    buttons.push(format!("Radius: {r}"));
-}
-
-pub(super) fn click(game: &mut crate::game::Game<'_>, mod_id: &str, button: usize) {
-    if mod_id != ID {
-        return;
-    }
-    match button {
-        0 => {
-            let v = !with(|s| s.enabled);
-            set_enabled(game, v);
-        }
-        1 => {
-            let next = match with(|s| s.threshold) {
-                0 => 4,
-                4 => 7,
-                7 => 10,
-                10 => 15,
-                _ => 0,
-            };
-            with(|s| s.threshold = next);
-            game.native_set_setting(ID, "threshold", &next.to_string());
-        }
-        2 => {
-            let next = {
-                let r = with(|s| s.radius);
-                if r < 16 { (r + 3).min(16) } else { 3 }
-            };
-            with(|s| s.radius = next);
-            game.native_set_setting(ID, "radius", &next.to_string());
-        }
-        _ => {}
     }
 }

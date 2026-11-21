@@ -1,28 +1,59 @@
-// Torch Placer — a reach-only helper mod for Horizon.
-//
-// Every `interval` ticks it looks for a nearby cell whose light level is at
-// or below `threshold`, that is empty, that the player is not standing in,
-// and that has a solid block under it. It selects a torch from the hotbar
-// and places it on that block's top face through the normal use action, so
-// vanilla placement rules, item consumption and reach checks still apply.
-// It never walks anywhere: torches appear around wherever you are.
+// Torch Placer — a reach-only helper. Each tick it finds the nearest dark,
+// empty, in-reach cell a torch can attach to, selects a torch from the
+// hotbar and places it through the normal use action, so vanilla placement
+// rules, item consumption and reach checks still apply.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub const ID: &str = "torchplacer";
-pub const VERSION: &str = "0.1.5";
-pub const DESCRIPTION: &str = "Places torches in nearby dark spots (reach only)";
 
 /// 4.5 blocks — vanilla reach for placing a block.
 const REACH2: f64 = 20.25;
+
+/// The `radius` setting's bounds and default, shared by `sync` and
+/// `/torch radius`.
+const RADIUS_MIN: i32 = 2;
+const RADIUS_MAX: i32 = 16;
+const DEFAULT_RADIUS: i32 = 7;
+/// The `threshold` setting's bounds and default, shared by `sync` and
+/// `/torch level`.
+const THRESHOLD_MIN: i32 = 0;
+const THRESHOLD_MAX: i32 = 15;
+const DEFAULT_THRESHOLD: i32 = 4;
+
+/// Ticks right-click stays claimed for one placement: the use action's
+/// `use_delay` is 4 ticks, so this gives it a chance to land.
+const HOLD_TICKS: u8 = 6;
+/// Ticks a cell is skipped after a placement landed, or after it failed.
+const COOLDOWN_PLACED: u32 = 200;
+const COOLDOWN_FAILED: u32 = 60;
+
+/// Items `torch_slot` counts as a torch.
+const TORCH_ITEMS: [&str; 4] = [
+    "minecraft:torch",
+    "minecraft:soul_torch",
+    "minecraft:redstone_torch",
+    "minecraft:copper_torch",
+];
+/// The blocks a torch is or becomes once placed (standing and wall forms):
+/// `is_torch_at` and `supported`'s exclusion — the old `contains("torch")`
+/// also matched torchflowers.
+const TORCH_BLOCKS: [&str; 8] = [
+    "minecraft:torch",
+    "minecraft:wall_torch",
+    "minecraft:soul_torch",
+    "minecraft:soul_wall_torch",
+    "minecraft:redstone_torch",
+    "minecraft:redstone_wall_torch",
+    "minecraft:copper_torch",
+    "minecraft:copper_wall_torch",
+];
 
 struct S {
     enabled: bool,
     radius: i32,
     threshold: i32,
-    interval: u32,
-    ticks: u32,
     /// Ticks left holding right-click for the placement in flight.
     held: u8,
     hit: Option<crate::game::Hit>,
@@ -30,33 +61,40 @@ struct S {
     warned: bool,
 }
 
-static ST: Mutex<Option<S>> = Mutex::new(None);
-fn with<R>(f: impl FnOnce(&mut S) -> R) -> R {
-    let mut g = ST.lock().unwrap_or_else(|e| e.into_inner());
+/// `ST`/`COOL` are lazily-filled `Mutex<Option<T>>`s: `locked` locks one,
+/// fills it with `new()` when empty and runs `f` on the value inside.
+fn locked<T, R>(
+    m: &Mutex<Option<T>>,
+    new: impl FnOnce() -> T,
+    f: impl FnOnce(&mut T) -> R,
+) -> R {
+    let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
     if g.is_none() {
-        *g = Some(S {
-            enabled: true,
-            radius: 7,
-            threshold: 4,
-            interval: 1,
-            ticks: 0,
-            held: 0,
-            hit: None,
-            target: [0; 3],
-            warned: false,
-        });
+        *g = Some(new());
     }
     f(g.as_mut().unwrap())
+}
+
+static ST: Mutex<Option<S>> = Mutex::new(None);
+fn with<R>(f: impl FnOnce(&mut S) -> R) -> R {
+    locked(&ST, fresh, f)
+}
+fn fresh() -> S {
+    S {
+        enabled: true,
+        radius: DEFAULT_RADIUS,
+        threshold: DEFAULT_THRESHOLD,
+        held: 0,
+        hit: None,
+        target: [0; 3],
+        warned: false,
+    }
 }
 
 /// Cells we placed a torch in (or failed to) recently, with ticks remaining.
 static COOL: Mutex<Option<HashMap<[i32; 3], u32>>> = Mutex::new(None);
 fn cool<R>(f: impl FnOnce(&mut HashMap<[i32; 3], u32>) -> R) -> R {
-    let mut g = COOL.lock().unwrap_or_else(|e| e.into_inner());
-    if g.is_none() {
-        *g = Some(HashMap::new());
-    }
-    f(g.as_mut().unwrap())
+    locked(&COOL, HashMap::new, f)
 }
 
 /// Input flags we set ourselves. The engine rewrites them on real input
@@ -89,12 +127,16 @@ fn release(game: &mut crate::game::Game<'_>) {
     }
 }
 
-fn say(game: &mut crate::game::Game<'_>, m: &str) {
-    game.native_chat(&format!("torch: {m}"));
+/// A translated chat line with the mod's `torch:` prefix.
+fn say(game: &mut crate::game::Game<'_>, text: horizon_client::text::Text) {
+    let mut line = horizon_client::text::Text::literal("torch: ");
+    line.push(text);
+    game.chat_line(line);
 }
 
-fn onoff(v: bool) -> &'static str {
-    if v { "on" } else { "off" }
+/// `Text::tr` shortened: a translatable message whose args are plain values.
+fn tr(key: &str, args: &[&dyn std::fmt::Display]) -> horizon_client::text::Text {
+    horizon_client::text::Text::tr(key, args)
 }
 
 /// Read persisted settings. Missing keys leave the defaults in place.
@@ -104,12 +146,12 @@ fn sync(game: &crate::game::Game<'_>) {
     }
     if let Some(v) = game.setting(ID, "radius") {
         if let Ok(n) = v.parse::<i32>() {
-            with(|s| s.radius = n.clamp(2, 16));
+            with(|s| s.radius = n.clamp(RADIUS_MIN, RADIUS_MAX));
         }
     }
     if let Some(v) = game.setting(ID, "threshold") {
         if let Ok(n) = v.parse::<i32>() {
-            with(|s| s.threshold = n.clamp(0, 15));
+            with(|s| s.threshold = n.clamp(THRESHOLD_MIN, THRESHOLD_MAX));
         }
     }
 }
@@ -152,17 +194,20 @@ fn torch_slot(game: &crate::game::Game<'_>) -> Option<usize> {
         .enumerate()
         .find_map(|(i, it)| {
             it.as_ref()
-                .filter(|s| s.item.as_ref().contains("torch"))
+                .filter(|s| TORCH_ITEMS.contains(&s.item.as_ref()))
                 .map(|_| i)
         })
 }
 
 fn is_torch_at(game: &crate::game::Game<'_>, p: [i32; 3]) -> bool {
-    game.res
-        .facts()
-        .get(game.world.block(p[0], p[1], p[2]))
-        .name
-        .contains("torch")
+    TORCH_BLOCKS.contains(
+        &game
+            .res
+            .facts()
+            .get(game.world.block(p[0], p[1], p[2]))
+            .name
+            .as_ref(),
+    )
 }
 
 /// Skip cells next to an existing torch — avoids stacking torches in the
@@ -186,13 +231,16 @@ fn intersects_player(game: &crate::game::Game<'_>, p: [i32; 3]) -> bool {
         return false;
     };
     let (px, py, pz) = (pl.position.x, pl.position.y, pl.position.z);
+    // The body's box: half its width each side of the position, its height up.
+    let half = f64::from(pl.dimensions.width) / 2.0;
+    let top = f64::from(pl.dimensions.height);
     let (x0, y0, z0) = (p[0] as f64, p[1] as f64, p[2] as f64);
-    px + 0.3 > x0
-        && px - 0.3 < x0 + 1.0
-        && py + 1.8 > y0
+    px + half > x0
+        && px - half < x0 + 1.0
+        && py + top > y0
         && py < y0 + 1.0
-        && pz + 0.3 > z0
-        && pz - 0.3 < z0 + 1.0
+        && pz + half > z0
+        && pz - half < z0 + 1.0
 }
 
 /// Nearest dark, empty, in-reach cell that can hold a torch. Returns the
@@ -207,7 +255,7 @@ fn scan(
     // A block can hold a torch if it is solid enough: full blocks, snow,
     // slabs and stairs. Ignore torches, fluids and unbreakable blocks.
     let supported = |f: &horizon_items::blocks::StateFacts| {
-        !f.name.contains("torch")
+        !TORCH_BLOCKS.contains(&f.name.as_ref())
             && f.fluid == horizon_items::blocks::Fluid::None
             && f.hardness >= 0.0
             && (f.full_collision
@@ -304,13 +352,12 @@ pub(super) fn tick(game: &mut crate::game::Game<'_>) {
         };
         (feet(p), [p.position.x, p.position.y + 1.62, p.position.z])
     };
-    if !with(|s| s.enabled) || !game.playing() {
+    if !with(|s| s.enabled) {
         release(game);
         return;
     }
 
-    // Finish an in-flight placement. `use_delay` is 4 ticks, so holding
-    // right for 6 gives the use action a chance to land.
+    // Finish an in-flight placement.
     if with(|s| s.held) > 0 {
         let hit = with(|s| s.hit);
         claim(game, hit);
@@ -322,7 +369,7 @@ pub(super) fn tick(game: &mut crate::game::Game<'_>) {
             let target = with(|s| s.target);
             let placed = is_torch_at(game, target);
             cool(|c| {
-                c.insert(target, if placed { 200 } else { 60 });
+                c.insert(target, if placed { COOLDOWN_PLACED } else { COOLDOWN_FAILED });
             });
             with(|s| s.hit = None);
             release(game);
@@ -331,23 +378,11 @@ pub(super) fn tick(game: &mut crate::game::Game<'_>) {
     }
 
     release(game);
-    let due = with(|s| {
-        s.ticks += 1;
-        if s.ticks >= s.interval {
-            s.ticks = 0;
-            true
-        } else {
-            false
-        }
-    });
-    if !due {
-        return;
-    }
 
     let Some(slot) = torch_slot(game) else {
         if !with(|s| s.warned) {
             with(|s| s.warned = true);
-            say(game, "no torch in the hotbar — put one in a slot 1-9");
+            say(game, tr("torchplacer.no_torch", &[]));
         }
         return;
     };
@@ -355,7 +390,7 @@ pub(super) fn tick(game: &mut crate::game::Game<'_>) {
         game.selected = slot;
         with(|s| {
             s.hit = Some(hit);
-            s.held = 6;
+            s.held = HOLD_TICKS;
             s.target = cell;
             s.warned = false;
         });
@@ -382,51 +417,78 @@ pub(super) fn command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut
         None => {
             let v = !with(|s| s.enabled);
             set_enabled(game, v);
-            say(game, &format!("auto-torch {}", onoff(v)));
+            say(
+                game,
+                tr(if v {
+                    "torchplacer.auto.on"
+                } else {
+                    "torchplacer.auto.off"
+                }, &[]),
+            );
         }
         Some("on") => {
             set_enabled(game, true);
-            say(game, "auto-torch on");
+            say(game, tr("torchplacer.auto.on", &[]));
         }
         Some("off") => {
             set_enabled(game, false);
-            say(game, "auto-torch off");
+            say(game, tr("torchplacer.auto.off", &[]));
         }
         Some("status") => {
-            let (v, r, t, i) = with(|s| (s.enabled, s.radius, s.threshold, s.interval));
+            let (v, r, t) = with(|s| (s.enabled, s.radius, s.threshold));
             say(
                 game,
-                &format!("auto-torch {} — light <= {t}, radius {r}, every {i} ticks", onoff(v)),
+                tr(
+                    if v {
+                        "torchplacer.status.on"
+                    } else {
+                        "torchplacer.status.off"
+                    },
+                    &[&t, &r],
+                ),
             );
         }
         Some("level" | "threshold") => {
             if let Some(n) = args.get(1).and_then(|v| v.parse::<i32>().ok()) {
-                let n = n.clamp(0, 15);
+                let n = n.clamp(THRESHOLD_MIN, THRESHOLD_MAX);
                 with(|s| s.threshold = n);
                 game.set_setting(ID, "threshold", &n.to_string());
-                say(game, &format!("light threshold {n}"));
+                say(game, tr("torchplacer.threshold", &[&n]));
             } else {
-                say(game, "/torch level <0-15>");
+                say(game, tr("torchplacer.threshold.usage", &[]));
             }
         }
         Some("radius") => {
             if let Some(n) = args.get(1).and_then(|v| v.parse::<i32>().ok()) {
-                let n = n.clamp(2, 16);
+                let n = n.clamp(RADIUS_MIN, RADIUS_MAX);
                 with(|s| s.radius = n);
                 game.set_setting(ID, "radius", &n.to_string());
-                say(game, &format!("radius {n} (actual reach is ~4.5 blocks)"));
+                say(game, tr("torchplacer.radius", &[&n]));
             } else {
-                say(game, "/torch radius <2-16>");
+                say(game, tr("torchplacer.radius.usage", &[]));
             }
-        }
-        Some("now") => {
-            with(|s| s.ticks = s.interval);
-            say(game, "scanning now");
         }
         Some("clear") => {
             cool(|c| c.clear());
-            say(game, "placement history cleared");
+            say(game, tr("torchplacer.cleared", &[]));
         }
-        _ => say(game, "/torch [on|off|status|level <n>|radius <n>|now|clear]"),
+        _ => say(game, tr("torchplacer.usage", &[])),
+    }
+}
+
+/// The /torch usages, pushed so the chat box completes and colours the
+/// command like the game's own; `command` above still executes them.
+pub(super) fn register_client_commands(commands: &mut Vec<mod_api::Command>) {
+    for usage in [
+        "torch",
+        "torch on",
+        "torch off",
+        "torch status",
+        "torch level <level:integer>",
+        "torch threshold <level:integer>",
+        "torch radius <radius:integer>",
+        "torch clear",
+    ] {
+        commands.push(mod_api::Command::new(usage));
     }
 }

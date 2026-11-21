@@ -9,7 +9,7 @@ capabilities = ["registries"]
 
 [native]
 game = "26.3"
-horizon = "0b14f8acfd97fa2c750e42795249dcc981178ca4"
+horizon = "f00125f61f794aaa3d4e950d301f353b35b6ee3d"
 mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
 
 [[native.module]]
@@ -35,3 +35,10 @@ bindings = [
   { name = "command", ty = "&str", value = "command" },
   { name = "ran", ty = "&mut bool", value = "&mut *ran" },
 ]
+
+[[native.mixin]]
+id = "register_client_commands"
+target = "horizon_client::game::native_hooks::base::Game::native_register_client_commands"
+kind = "HEAD"
+helper = "src/mixins/register.rs"
+bindings = [{ name = "commands", ty = "&mut Vec<mod_api::Command>", value = "&mut *commands" }]

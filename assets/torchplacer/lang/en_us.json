@@ -1,0 +1,13 @@
+{
+  "torchplacer.auto.on": "auto-torch on",
+  "torchplacer.auto.off": "auto-torch off",
+  "torchplacer.status.on": "auto-torch on — light <= %s, radius %s",
+  "torchplacer.status.off": "auto-torch off — light <= %s, radius %s",
+  "torchplacer.no_torch": "no torch in the hotbar — put one in a slot 1-9",
+  "torchplacer.threshold": "light threshold %s",
+  "torchplacer.threshold.usage": "/torch level <0-15>",
+  "torchplacer.radius": "radius %s (actual reach is ~4.5 blocks)",
+  "torchplacer.radius.usage": "/torch radius <2-16>",
+  "torchplacer.cleared": "placement history cleared",
+  "torchplacer.usage": "/torch [on|off|status|level <n>|radius <n>|clear]"
+}
